@@ -1,0 +1,218 @@
+﻿---
+- name: Настройка базової безпеки та програм
+  hosts: all
+  become: true
+  tasks:
+    - name: Оновити кеш apt
+      apt:
+        update_cache: true
+
+
+    - name: Встановити ufw, fail2ban і інші базові пакети
+      apt:
+        name:
+          - ufw
+          - fail2ban
+        state: present
+
+
+    - name: Відкрити порти для SSH, HTTP і Logstash (ELK)
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop:
+        - 22   # SSH
+        - 80   # HTTP (nginx)
+        - 5044 # Logstash (ELK)
+        - 5061 # Додатковий порт, якщо потрібно
+        - 9200
+
+
+    - name: Увімкнути ufw
+      ufw:
+        state: enabled
+        logging: on
+
+
+    - name: Задати політику за замовчуванням для вхідного трафіку (deny)
+      ufw:
+        default: deny
+        direction: incoming
+
+
+    - name: Задати політику за замовчуванням для вихідного трафіку (allow)
+      ufw:
+        default: allow
+        direction: outgoing
+
+
+    - name: Налаштування безпеки для SSH
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      loop:
+        - { regexp: '^#?PermitRootLogin', line: 'PermitRootLogin no' }
+        - { regexp: '^#?PasswordAuthentication', line: 'PasswordAuthentication yes' }
+        - { regexp: '^#?ChallengeResponseAuthentication', line: 'ChallengeResponseAuthentication no' }
+        - { regexp: '^#?UsePAM', line: 'UsePAM yes' }
+
+
+    - name: Перезапустити SSH
+      service:
+        name: ssh
+        state: restarted
+
+
+- name: Встановлення та налаштування LEMP-стека на ubu1
+  hosts: web
+  become: true
+  tasks:
+    - name: Встановити LEMP-стек (Nginx, MySQL, PHP)
+      apt:
+        name:
+          - nginx
+          - mysql-server
+          - php-fpm
+          - php-mysql
+        state: present
+
+
+    - name: Налаштувати Nginx для роботи з PHP
+      template:
+        src: templates/nginx.conf.j2
+        dest: /etc/nginx/sites-available/default
+      notify:
+        - restart nginx
+
+
+    - name: Створити файл index.html
+      copy:
+        content: "<h1>Hello, World!</h1>"
+        dest: /var/www/html/index.html
+        owner: www-data
+        group: www-data
+        mode: '0644'
+
+
+    - name: Перевірити права доступу до /var/www/html
+      command: chown -R www-data:www-data /var/www/html
+
+
+    - name: Перезапустити Nginx
+      service:
+        name: nginx
+        state: restarted
+
+
+  handlers:
+    - name: restart nginx
+      service:
+        name: nginx
+        state: restarted
+
+
+- name: Встановлення та налаштування ELK-стека на ubu2
+  hosts: elk
+  become: true
+  tasks:
+    - name: Встановити Java для ELK
+      apt:
+        name: default-jre
+        state: present
+
+
+    - name: Додати репозиторій Elasticsearch
+      apt_repository:
+        repo: 'deb https://artifacts.elastic.co/packages/7.x/apt stable main'
+        state: present
+
+
+    - name: Додати GPG ключ для Elasticsearch
+      apt_key:
+        url: 'https://artifacts.elastic.co/GPG-KEY-elasticsearch'
+        state: present
+
+
+    - name: Встановити Elasticsearch, Kibana та Logstash
+      apt:
+        name:
+          - elasticsearch
+          - kibana
+          - logstash
+        state: present
+
+
+    - name: Запустити та увімкнути Elasticsearch, Kibana, Logstash
+      service:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop:
+        - elasticsearch
+        - kibana
+        - logstash
+
+
+    - name: Налаштування Elasticsearch
+      lineinfile:
+        path: /etc/elasticsearch/elasticsearch.yml
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      loop:
+        - { regexp: '^path.data', line: 'path.data: /var/lib/elasticsearch' }
+        - { regexp: '^path.logs', line: 'path.logs: /var/log/elasticsearch' }
+        - { regexp: '^xpack.security.enabled', line: 'xpack.security.enabled: false' }
+        - { regexp: '^cluster.initial_master_nodes', line: 'cluster.initial_master_nodes: ["ubu2"]' }
+        - { regexp: '^http.host', line: 'http.host: 0.0.0.0' }
+
+
+    - name: Налаштування Kibana
+      lineinfile:
+        path: /etc/kibana/kibana.yml
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      loop:
+        - { regexp: '^server.host', line: 'server.host: "0.0.0.0"' }
+        - { regexp: '^elasticsearch.hosts', line: 'elasticsearch.hosts: ["http://localhost:9200"]' }
+        - { regexp: '^elasticsearch.username', line: 'elasticsearch.username: "ralend"' }
+        - { regexp: '^elasticsearch.password', line: 'elasticsearch.password: "5686424"' }
+
+
+- name: Налаштування моніторингу Nginx
+  hosts: web
+  become: true
+  tasks:
+    - name: Встановити Filebeat
+      apt:
+        name: filebeat
+        state: present
+
+
+    - name: Налаштувати Filebeat для передачі логів в Logstash
+      template:
+        src: templates/filebeat.yml.j2
+        dest: /etc/filebeat/filebeat.yml
+      notify:
+        - restart filebeat
+
+
+    - name: Запустити та увімкнути Filebeat
+      service:
+        name: filebeat
+        state: started
+        enabled: true
+
+
+    - name: Перевірити доступність Nginx
+      uri:
+        url: http://localhost
+        return_content: yes
+
+
+  handlers:
+    - name: restart filebeat
+      service:
+        name: filebeat
+        state: restarted
